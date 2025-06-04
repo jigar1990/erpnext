@@ -19,9 +19,11 @@ class BOMScrapItem(Document):
 		base_rate: DF.Currency
 		item_code: DF.Link
 		item_name: DF.Data | None
+		material_type: DF.Literal["By Product", "Co Product"]
 		parent: DF.Data
 		parentfield: DF.Data
 		parenttype: DF.Data
+		percentage: DF.Float
 		rate: DF.Currency
 		stock_qty: DF.Float
 		stock_uom: DF.Link | None

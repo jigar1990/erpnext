@@ -53,6 +53,9 @@ from erpnext.stock.serial_batch_bundle import (
 from erpnext.stock.stock_ledger import NegativeStockError, get_previous_sle, get_valuation_rate
 from erpnext.stock.utils import get_bin, get_incoming_rate
 
+frappe.utils.logger.set_log_level("DEBUG")
+logger = frappe.logger("dev", allow_site=True, file_count=50)
+
 
 class FinishedGoodError(frappe.ValidationError):
 	pass
@@ -365,8 +368,9 @@ class StockEntry(StockController):
 				frappe.delete_doc("Stock Entry", d.name)
 
 	def set_transfer_qty(self):
-		self.validate_qty_is_not_zero()
 		for item in self.get("items"):
+			if not flt(item.qty):
+				frappe.throw(_("Row {0}: Qty is mandatory").format(item.idx), title=_("Zero quantity"))
 			if not flt(item.conversion_factor):
 				frappe.throw(_("Row {0}: UOM Conversion Factor is mandatory").format(item.idx))
 			item.transfer_qty = flt(
@@ -520,19 +524,17 @@ class StockEntry(StockController):
 			if acc_details.account_type == "Stock":
 				frappe.throw(
 					_(
-						"At row #{0}: the Difference Account must not be a Stock type account, please change the Account Type for the account {1} or select a different account"
+						"At row {0}: the Difference Account must not be a Stock type account, please change the Account Type for the account {1} or select a different account"
 					).format(d.idx, get_link_to_form("Account", d.expense_account)),
-					title=_("Difference Account in Items Table"),
+					OpeningEntryAccountError,
 				)
 
 			if self.purpose != "Material Issue" and acc_details.account_type == "Cost of Goods Sold":
 				frappe.msgprint(
 					_(
-						"At row #{0}: you have selected the Difference Account {1}, which is a Cost of Goods Sold type account. Please select a different account"
+						"At row {0}: You have selected the Difference Account {1}, which is a Cost of Goods Sold type account. Please select a different account"
 					).format(d.idx, bold(get_link_to_form("Account", d.expense_account))),
-					title=_("Cost of Goods Sold Account in Items Table"),
-					indicator="orange",
-					alert=1,
+					title=_("Warning : Cost of Goods Sold Account"),
 				)
 
 	def validate_warehouse(self):
@@ -841,7 +843,11 @@ class StockEntry(StockController):
 			# do not round off basic rate to avoid precision loss
 			d.basic_rate = flt(d.basic_rate)
 			d.basic_amount = flt(flt(d.transfer_qty) * flt(d.basic_rate), d.precision("basic_amount"))
-
+				
+		if self.purpose == "Manufacture":
+			calculation_type = frappe.db.get_value("BOM", self.bom_no, "calculation_type")
+			self.set_total_cost_for_manufactured_item(calculation_type,finished_item_qty, outgoing_items_cost)
+			
 		if items:
 			message = ""
 
@@ -904,7 +910,7 @@ class StockEntry(StockController):
 	def get_basic_rate_for_manufactured_item(self, finished_item_qty, outgoing_items_cost=0) -> float:
 		settings = frappe.get_single("Manufacturing Settings")
 		scrap_items_cost = sum([flt(d.basic_amount) for d in self.get("items") if d.is_scrap_item])
-
+		
 		if settings.material_consumption:
 			if settings.get_rm_cost_from_consumption_entry and self.work_order:
 				# Validate only if Material Consumption Entry exists for the Work Order.
@@ -968,6 +974,207 @@ class StockEntry(StockController):
 
 		return flt((outgoing_items_cost - scrap_items_cost) / finished_item_qty)
 
+	def set_total_cost_for_manufactured_item(self,calculation_type, finished_item_qty, outgoing_items_cost=0):
+		settings = frappe.get_single("Manufacturing Settings")
+		if settings.material_consumption:
+			if settings.get_rm_cost_from_consumption_entry and self.work_order:
+				# Validate only if Material Consumption Entry exists for the Work Order.
+				if frappe.db.exists(
+					"Stock Entry",
+					{
+						"docstatus": 1,
+						"work_order": self.work_order,
+						"purpose": "Material Consumption for Manufacture",
+					},
+				):
+					for item in self.items:
+						if not item.is_finished_item and not item.is_scrap_item:
+							label = frappe.get_meta(settings.doctype).get_label(
+								"get_rm_cost_from_consumption_entry"
+							)
+							frappe.throw(
+								_(
+									"Row {0}: As {1} is enabled, raw materials cannot be added to {2} entry. Use {3} entry to consume raw materials."
+								).format(
+									item.idx,
+									frappe.bold(label),
+									frappe.bold(_("Manufacture")),
+									frappe.bold(_("Material Consumption for Manufacture")),
+								)
+							)
+
+					if frappe.db.exists(
+						"Stock Entry",
+						{
+							"docstatus": 1,
+							"work_order": self.work_order,
+							"purpose": "Manufacture",
+							"name": ("!=", self.name),
+						},
+					):
+						frappe.throw(
+							_("Only one {0} entry can be created against the Work Order {1}").format(
+								frappe.bold(_("Manufacture")), frappe.bold(self.work_order)
+							)
+						)
+
+					SE = frappe.qb.DocType("Stock Entry")
+					SE_ITEM = frappe.qb.DocType("Stock Entry Detail")
+
+					outgoing_items_cost = (
+						frappe.qb.from_(SE)
+						.left_join(SE_ITEM)
+						.on(SE.name == SE_ITEM.parent)
+						.select(Sum(SE_ITEM.valuation_rate * SE_ITEM.transfer_qty))
+						.where(
+							(SE.docstatus == 1)
+							& (SE.work_order == self.work_order)
+							& (SE.purpose == "Material Consumption for Manufacture")
+						)
+					).run()[0][0] or 0
+
+			elif not outgoing_items_cost:
+				bom_items = self.get_bom_raw_materials(finished_item_qty)
+				outgoing_items_cost = sum([flt(row.qty) * flt(row.rate) for row in bom_items.values()])
+
+		#productionQty = sum([flt(item.qty) for item in self.items if item.is_scrap_item | item.is_finished_item ])
+		#logger.info(f"calculation_type = 1 {calculation_type == 1}")
+		scrap_item_dict = self.get_bom_scrap_material(self.fg_completed_qty)
+		# logger.info(f"scrap_item_dict : {scrap_item_dict}")
+		# for item in scrap_item_dict.values():
+		# 	logger.info(f"si : {item}")
+		
+		if calculation_type == "1":
+			productionQty = 0
+			for item in self.items:
+				if item.is_finished_item or  item.is_scrap_item:
+					productionQty = productionQty + item.qty
+					
+			for item in self.get("items"):
+				if item.is_finished_item or  item.is_scrap_item:
+					item.basic_rate = flt(outgoing_items_cost /productionQty)
+					item.basic_amount = item.qty * item.basic_rate
+
+		#Fixed Rate
+		elif calculation_type == "2":
+			for item in self.get("items"):
+				if item.is_finished_item:
+					item.basic_rate = frappe.db.get_value("BOM", self.bom_no, "custom_rate")
+					item.basic_amount = item.qty * item.basic_rate
+				if item.is_scrap_item:
+					logger.info(f"rate : {item.basic_rate}")
+					item.basic_rate = item.basic_rate
+					item.basic_amount = item.qty * item.basic_rate
+
+		#By Product (%) And Co Product Avg. Rate And Main Product Avg. Rate
+		elif calculation_type == "3":
+			productionQty = 0
+			remaining_Cost = 0
+			for item in self.items:
+				if item.is_finished_item:# or (item.material_type == 'Co Product' and  item.is_scrap_item):
+					productionQty = productionQty + item.qty
+				if item.is_scrap_item:					
+					scrap_item= [d for d in scrap_item_dict.values() if (d['item_code'] == item.item_code)]
+					logger.info(f"dsww : {(scrap_item[0]['material_type'])}")
+					if scrap_item[0]['material_type'] == 'Co Product':
+						productionQty = productionQty + item.qty
+			
+			for item in self.get("items"):
+				if (item.is_scrap_item):
+					scrap_item= [d for d in scrap_item_dict.values() if (d['item_code'] == item.item_code)]
+					if scrap_item[0]['material_type'] == 'By Product' and item.qty > 0:
+						item.basic_rate = flt(flt(outgoing_items_cost * scrap_item[0]['percentage'] /100)/item.qty)
+						item.basic_amount = flt(item.qty * item.basic_rate)
+						remaining_Cost = remaining_Cost + item.basic_amount
+			
+			for item in self.get("items"):
+				if item.is_finished_item:
+					item.basic_rate = flt((outgoing_items_cost - remaining_Cost) /productionQty)
+					item.basic_amount = item.qty * item.basic_rate
+				if item.is_scrap_item:					
+					scrap_item= [d for d in scrap_item_dict.values() if (d['item_code'] == item.item_code)]
+					if scrap_item[0]['material_type'] == 'Co Product':
+						item.basic_rate = flt((outgoing_items_cost - remaining_Cost) /productionQty)
+						item.basic_amount = item.qty * item.basic_rate
+
+		#By Product (%) And Co Product (%) And Main Product Avg. Rate 
+		elif calculation_type == "4":
+			productionQty = 0
+			remaining_Cost = 0
+			for item in self.items:
+				if item.is_finished_item:
+					productionQty = productionQty + item.qty
+			
+			for item in self.get("items"):
+				if (item.is_scrap_item) and item.qty > 0:
+					scrap_item= [d for d in scrap_item_dict.values() if (d['item_code'] == item.item_code)]
+					item.basic_rate = flt(flt(outgoing_items_cost * scrap_item[0]['percentage'] /100)/item.qty)
+					item.basic_amount = flt(item.qty * item.basic_rate)
+					remaining_Cost = remaining_Cost + item.basic_amount
+			
+			for item in self.get("items"):
+				if item.is_finished_item:
+					item.basic_rate = flt((outgoing_items_cost - remaining_Cost) /productionQty)
+					item.basic_amount = item.qty * item.basic_rate
+					
+		#By Product Fixed And Co Product Avg. Rate And Main Product Avg. Rate 
+		elif calculation_type == "5":
+			productionQty = 0
+			remaining_Cost = 0
+						
+			for item in self.items:
+				if item.is_finished_item:
+					productionQty = productionQty + item.qty
+				if item.is_scrap_item:					
+					scrap_item= [d for d in scrap_item_dict.values() if (d['item_code'] == item.item_code)]
+					if scrap_item[0]['material_type'] == 'Co Product':
+						productionQty = productionQty + item.qty
+					if scrap_item[0]['material_type'] == 'By Product' and item.qty > 0:
+						item.basic_rate = item.basic_rate
+						item.basic_amount = flt(item.qty * item.basic_rate)
+						remaining_Cost = remaining_Cost + item.basic_amount
+
+			# for item in self.get("items"):
+			# 	if (item.is_scrap_item):
+			# 		scrap_item= [d for d in scrap_item_dict.values() if (d['item_code'] == item.item_code)]
+			# 		if scrap_item[0]['material_type'] == 'By Product' and item.qty > 0:
+			# 			item.basic_rate = item.basic_rate
+			# 			item.basic_amount = flt(item.qty * item.basic_rate)
+			# 			remaining_Cost = remaining_Cost + item.basic_amount
+
+			for item in self.get("items"):
+				if item.is_finished_item:
+					item.basic_rate = flt((outgoing_items_cost - remaining_Cost) /productionQty)
+					item.basic_amount = item.qty * item.basic_rate
+				if item.is_scrap_item:					
+					scrap_item= [d for d in scrap_item_dict.values() if (d['item_code'] == item.item_code)]
+					if scrap_item[0]['material_type'] == 'Co Product':
+						item.basic_rate = flt((outgoing_items_cost - remaining_Cost) /productionQty)
+						item.basic_amount = item.qty * item.basic_rate
+			
+		#By Product Fixed And Co Product Avg. Rate And Main Product Avg. Rate 
+		elif calculation_type == "6":
+			productionQty = 0
+			remaining_Cost = 0
+
+			for item in self.get("items"):
+				if item.is_scrap_item:
+					item.basic_rate = item.basic_rate
+					item.basic_amount = item.qty * item.basic_rate
+					remaining_Cost = remaining_Cost + item.basic_amount
+
+			for item in self.get("items"):
+				if item.is_finished_item :
+					item.basic_rate = flt((outgoing_items_cost - remaining_Cost) /item.qty)
+					item.basic_amount = item.qty * item.basic_rate
+
+		else:
+			scrap_items_cost = sum([flt(d.basic_amount) for d in self.get("items") if d.is_scrap_item])
+			for item in self.items:
+				if item.is_finished_item:
+					item.basic_rate = flt((outgoing_items_cost - scrap_items_cost) / finished_item_qty)
+					item.amount = item.qty * item.basic_rate
+		
 	def distribute_additional_costs(self):
 		# If no incoming items, set additional costs blank
 		if not any(d.item_code for d in self.items if d.t_warehouse):
@@ -1931,8 +2138,9 @@ class StockEntry(StockController):
 			for item in scrap_item_dict.values():
 				if self.pro_doc and self.pro_doc.scrap_warehouse:
 					item["to_warehouse"] = self.pro_doc.scrap_warehouse
-
+				#logger.info(f"scrap_item_dict{item}")
 			self.add_to_stock_entry_detail(scrap_item_dict, bom_no=self.bom_no)
+			
 
 	def set_process_loss_qty(self):
 		if self.purpose not in ("Manufacture", "Repack"):
@@ -2060,12 +2268,24 @@ class StockEntry(StockController):
 
 	def get_bom_raw_materials(self, qty):
 		from erpnext.manufacturing.doctype.bom.bom import get_bom_items_as_dict
+		scrap_item_dict = (
+				get_bom_items_as_dict(
+					self.bom_no, self.company, qty=1, fetch_exploded=0, fetch_scrap_items=1
+				)
+				or {}
+			)
+		productionQty = flt(qty)
 
+		for d in scrap_item_dict.values():
+			if d['material_type'] == 'Co Product':
+				logger.info(f"get_bom_raw_materials : {d.qty}")
+				productionQty = flt(productionQty + flt(d.qty))
+					
 		# item dict = { item_code: {qty, description, stock_uom} }
 		item_dict = get_bom_items_as_dict(
 			self.bom_no,
 			self.company,
-			qty=qty,
+			qty=productionQty,
 			fetch_exploded=self.use_multi_level_bom,
 			fetch_qty_in_stock_uom=False,
 		)
@@ -2113,6 +2333,7 @@ class StockEntry(StockController):
 		for item in item_dict.values():
 			item.from_warehouse = ""
 			item.is_scrap_item = 1
+			#logger.info(f"scrap : {item}")
 
 		for row in self.get_scrap_items_from_job_card():
 			if row.stock_qty <= 0:
@@ -2121,7 +2342,6 @@ class StockEntry(StockController):
 			item_row = item_dict.get(row.item_code)
 			if not item_row:
 				item_row = frappe._dict({})
-
 			item_row.update(
 				{
 					"uom": row.stock_uom,
@@ -2490,6 +2710,9 @@ class StockEntry(StockController):
 			se_child.is_scrap_item = item_row.get("is_scrap_item", 0)
 			se_child.po_detail = item_row.get("po_detail")
 			se_child.sco_rm_detail = item_row.get("sco_rm_detail")
+			#se_child.percentage = item_row.get("percentage")
+			#se_child.material_type = item_row.get("material_type")
+			se_child.basic_rate = item_row.get("rate")
 
 			for field in [
 				self.subcontract_data.rm_detail_field,
@@ -2974,7 +3197,7 @@ def get_valuation_rate_for_finished_good_entry(work_order):
 			"work_order": work_order,
 		},
 	)
-
+ 
 	if stock_data:
 		return stock_data[0].valuation_rate
 

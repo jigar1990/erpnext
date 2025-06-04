@@ -1,0 +1,88 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "autoname": "autoincrement",
+ "creation": "2025-05-19 17:47:08.585889",
+ "default_view": "Report",
+ "doctype": "DocType",
+ "document_type": "Setup",
+ "engine": "InnoDB",
+ "field_order": [
+  "bom_calculation_type_section",
+  "calculation_type",
+  "column_break_hrgf",
+  "calculation_desc"
+ ],
+ "fields": [
+  {
+   "fieldname": "bom_calculation_type_section",
+   "fieldtype": "Section Break",
+   "label": "BOM Calculation Type"
+  },
+  {
+   "fieldname": "calculation_type",
+   "fieldtype": "Small Text",
+   "in_list_view": 1,
+   "label": "Calculation Type",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_hrgf",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "calculation_desc",
+   "fieldtype": "Long Text",
+   "label": "Calculation Desc"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2025-05-20 09:45:50.143289",
+ "modified_by": "Administrator",
+ "module": "Manufacturing",
+ "name": "BOM Calculation Type",
+ "naming_rule": "Autoincrement",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Manufacturing Manager",
+   "share": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Manufacturing User",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "show_title_field_in_link": 1,
+ "sort_field": "modified",
+ "sort_order": "ASC",
+ "states": [],
+ "title_field": "calculation_type",
+ "translated_doctype": 1
+}

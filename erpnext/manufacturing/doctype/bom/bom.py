@@ -7,7 +7,7 @@ from collections import deque
 from operator import itemgetter
 
 import frappe
-from frappe import _, bold
+from frappe import _
 from frappe.core.doctype.version.version import get_diff
 from frappe.model.mapper import get_mapped_doc
 from frappe.utils import cint, cstr, flt, today
@@ -19,6 +19,9 @@ from erpnext.stock.doctype.item.item import get_item_details
 from erpnext.stock.get_item_details import get_conversion_factor, get_price_list_rate
 
 form_grid_templates = {"items": "templates/form_grid/item_grid.html"}
+
+frappe.utils.logger.set_log_level("DEBUG")
+logger = frappe.logger("dev", allow_site=True, file_count=50)
 
 
 class BOMRecursionError(frappe.ValidationError):
@@ -106,12 +109,11 @@ class BOM(WebsiteGenerator):
 	from typing import TYPE_CHECKING
 
 	if TYPE_CHECKING:
-		from frappe.types import DF
-
 		from erpnext.manufacturing.doctype.bom_explosion_item.bom_explosion_item import BOMExplosionItem
 		from erpnext.manufacturing.doctype.bom_item.bom_item import BOMItem
 		from erpnext.manufacturing.doctype.bom_operation.bom_operation import BOMOperation
 		from erpnext.manufacturing.doctype.bom_scrap_item.bom_scrap_item import BOMScrapItem
+		from frappe.types import DF
 
 		allow_alternative_item: DF.Check
 		amended_from: DF.Link | None
@@ -122,6 +124,7 @@ class BOM(WebsiteGenerator):
 		bom_creator: DF.Link | None
 		bom_creator_item: DF.Data | None
 		buying_price_list: DF.Link | None
+		calculation_type: DF.Link | None
 		company: DF.Link
 		conversion_rate: DF.Float
 		currency: DF.Link
@@ -655,16 +658,9 @@ class BOM(WebsiteGenerator):
 	def check_recursion(self, bom_list=None):
 		"""Check whether recursion occurs in any bom"""
 
-		def _throw_error(bom_name, production_item=None):
-			msg = _("BOM recursion: {1} cannot be parent or child of {0}").format(self.name, bom_name)
-			if production_item and bom_name != self.name:
-				msg += "<br><br>"
-				msg += _(
-					"Note: If you want to use the finished good {0} as a raw material, then enable the 'Do Not Explode' checkbox in the Items table against the same raw material."
-				).format(bold(production_item))
-
+		def _throw_error(bom_name):
 			frappe.throw(
-				msg,
+				_("BOM recursion: {1} cannot be parent or child of {0}").format(self.name, bom_name),
 				exc=BOMRecursionError,
 			)
 
@@ -681,7 +677,7 @@ class BOM(WebsiteGenerator):
 			if self.item == item.item_code and item.bom_no:
 				# Same item but with different BOM should not be allowed.
 				# Same item can appear recursively once as long as it doesn't have BOM.
-				_throw_error(item.bom_no, self.item)
+				_throw_error(item.bom_no)
 
 		if self.name in {d.bom_no for d in self.items}:
 			_throw_error(self.name)
@@ -1030,6 +1026,56 @@ class BOM(WebsiteGenerator):
 		if self.process_loss_qty and must_be_whole_number and self.process_loss_qty % 1 != 0:
 			msg = f"Item: {frappe.bold(self.item)} with Stock UOM: {frappe.bold(self.uom)} can't have fractional process loss qty as UOM {frappe.bold(self.uom)} is a whole Number."
 			frappe.throw(msg, title=_("Invalid Process Loss Configuration"))
+		
+		#logger.info(f"self : {self.item_name}")
+		errmessage = ""
+		#Average Rate
+		if self.calculation_type == 1:
+			for item in self.scrap_items:
+				if item.percentage > 0 or item.rate > 0:
+					errmessage = errmessage + item.item_code +" : " + item.item_name +"<br/>"
+		
+		#Fixed Rate
+		if self.calculation_type == 2:
+			if self.custom_rate <=0:
+					errmessage = errmessage + " Finish Item : " + self.item_name +"<br/>"
+			for item in self.scrap_items:
+				if item.rate <= 0:
+					errmessage = errmessage + item.item_code +" : " + item.item_name +"<br/>"
+
+		#By Product (%) And Co Product Avg. Rate And Main Product Avg. Rate 
+		if self.calculation_type == 3:
+			for item in self.scrap_items:
+				if  item.material_type == 'By Product' and (item.percentage <= 0):
+					errmessage = errmessage + item.item_code +" : " + item.item_name +"<br/>"
+				if  item.material_type == 'Co Product' and (item.percentage > 0 or item.rate > 0):
+					errmessage = errmessage + item.item_code +" : " + item.item_name +"<br/>"
+
+		#By Product (%) And Co Product (%) And Main Product Avg. Rate 
+		if self.calculation_type == 4:
+			for item in self.scrap_items:
+				if  (item.percentage <= 0):
+					errmessage = errmessage + item.item_code +" : " + item.item_name +"<br/>"
+
+		#By Product Fixed And Co Product Avg. Rate And Main Product Avg. Rate 
+		if self.calculation_type == 5:
+			for item in self.scrap_items:
+				if  item.material_type == 'By Product' and (item.rate <= 0):
+					errmessage = errmessage + item.item_code +" : " + item.item_name +"<br/>"
+				if  item.material_type == 'Co Product' and (item.percentage > 0 or item.rate > 0):
+					errmessage = errmessage + item.item_code+" : " + item.item_name +"<br/>"
+		
+		#By Product Fixed And Co Product Fixed And Main Product Avg. Rate
+		if self.calculation_type == 6:
+			for item in self.scrap_items:
+				if  (item.rate <= 0):
+					errmessage = errmessage + item.item_code +" : " + item.item_name +"<br/>"
+
+		if errmessage != "":
+			frappe.throw(_("configure below manufacturing and Scrap items according to calculation type <br/>" + errmessage))	
+		
+		# logger.info(f"calculation_type {self.calculation_type }")
+		# frappe.throw(_("Percentage cannot be greater than 100"))
 
 
 def get_bom_item_rate(args, bom_doc):
@@ -1189,12 +1235,13 @@ def get_bom_items_as_dict(
 		query = query.format(
 			table="BOM Scrap Item",
 			where_conditions="",
-			select_columns=", item.description",
+			select_columns=", item.description,  bom_item.material_type,bom_item.percentage",
 			is_stock_item=is_stock_item,
 			qty_field="stock_qty",
 		)
-
+		#logger.info(f"query {query}")
 		items = frappe.db.sql(query, {"qty": qty, "bom": bom, "company": company}, as_dict=True)
+		
 	else:
 		query = query.format(
 			table="BOM Item",
@@ -1222,7 +1269,7 @@ def get_bom_items_as_dict(
 			company_in_record = frappe.db.get_value(d[0], item_details.get(d[1]), "company")
 			if not item_details.get(d[1]) or (company_in_record and company != company_in_record):
 				item_dict[item][d[1]] = frappe.get_cached_value("Company", company, d[2]) if d[2] else None
-
+	#logger.info(f"query{query}")
 	return item_dict
 
 
@@ -1614,7 +1661,7 @@ def get_scrap_items_from_sub_assemblies(bom_no, company, qty, scrap_items=None):
 	# fetch Scrap Items for Parent Bom
 	items = get_bom_items_as_dict(bom_no, company, qty=qty, fetch_exploded=0, fetch_scrap_items=1)
 	scrap_items.update(items)
-
+	
 	for row in bom_items:
 		if not row.bom_no:
 			continue
