@@ -468,7 +468,7 @@ class WorkOrder(Document):
 			self.update_work_order_qty_in_combined_so()
 		else:
 			self.update_work_order_qty_in_so()
-		logger.info("on_submit")
+
 		self.update_ordered_qty()
 		self.update_reserved_qty_for_production()
 		self.update_completed_qty_in_material_request()
@@ -1047,7 +1047,6 @@ class WorkOrder(Document):
 				)
 
 	def validate_transfer_against(self):
-		logger.info("validate_transfer_against")
 		if not self.docstatus == 1:
 			# let user configure operations until they're ready to submit
 			return
@@ -1112,23 +1111,23 @@ class WorkOrder(Document):
 			operation = self.operations[0].operation
 
 		if self.bom_no and self.qty:
-			scrap_item_dict = (
-				get_bom_items_as_dict(
-					self.bom_no, self.company, qty=1, fetch_exploded=0, fetch_scrap_items=1
-				)
-				or {}
-			)
-			
+
 			productionQty = self.qty
-			for d in scrap_item_dict.values():
-				logger.info(f"dsww : {(d['material_type'])}")
-				if d['material_type'] == 'Co Product':
-					productionQty = productionQty + d.qty
+			# scrap_item_dict = (
+			# 	get_bom_items_as_dict(
+			# 		self.bom_no, self.company, qty=productionQty, fetch_exploded=0, fetch_scrap_items=1
+			# 	)
+			# 	or {}
+			# )
+			
+			# for d in scrap_item_dict.values():
+			# 	logger.info(f"dsww : {(d['material_type'])}")
+			# 	if d['material_type'] == 'Co Product':
+			# 		productionQty = productionQty + d.qty
 
 			item_dict = get_bom_items_as_dict(
 				self.bom_no, self.company, qty=productionQty, fetch_exploded=self.use_multi_level_bom
 			)
-			logger.info(f"set_required_items qqq :{productionQty}")
 			
 			if reset_only_qty:
 				for d in self.get("required_items"):
@@ -1486,7 +1485,6 @@ def make_stock_entry(work_order_id, purpose, qty=None, target_warehouse=None):
 	stock_entry.set_stock_entry_type()
 	stock_entry.get_items()
 	
-	#logger.info(f"work_order_id  {work_order_id}")
 	if purpose != "Disassemble":
 		stock_entry.set_serial_no_batch_for_finished_good()
 
@@ -1808,3 +1806,89 @@ def make_stock_return_entry(work_order):
 	stock_entry.set_stock_entry_type()
 
 	return stock_entry
+
+
+@frappe.whitelist()
+def get_coproduct_scrap_items(bom_no,purpose):
+	bom = frappe.get_doc("BOM", bom_no)	
+	return [
+		{
+			"item_code": scrap.item_code,
+			"qty": scrap.stock_qty,
+			"uom": scrap.stock_uom,
+			"material_type": scrap.material_type
+		}
+        for scrap in bom.scrap_items
+		if (purpose == "Material Transfer for Manufacture" and scrap.material_type == 'Co Product') or purpose != "Material Transfer for Manufacture" #apply filter
+    ]
+
+@frappe.whitelist()
+def make_Custom_stock_entry(work_order_id, purpose, qty=None, target_warehouse=None,scrap_items=None):
+
+	work_order = frappe.get_doc("Work Order", work_order_id)
+	if not frappe.db.get_value("Warehouse", work_order.wip_warehouse, "is_group"):
+		wip_warehouse = work_order.wip_warehouse
+	else:
+		wip_warehouse = None
+
+	stock_entry = frappe.new_doc("Stock Entry")
+	stock_entry.purpose = purpose
+	stock_entry.work_order = work_order_id
+	stock_entry.company = work_order.company
+	stock_entry.from_bom = 1
+	stock_entry.bom_no = work_order.bom_no
+	stock_entry.use_multi_level_bom = work_order.use_multi_level_bom
+	# accept 0 qty as well
+	stock_entry.fg_completed_qty = (
+		qty if qty is not None else (flt(work_order.qty) - flt(work_order.produced_qty))
+	)
+
+	if work_order.bom_no:
+		stock_entry.inspection_required = frappe.db.get_value("BOM", work_order.bom_no, "inspection_required")
+
+
+	if purpose == "Material Transfer for Manufacture":
+		stock_entry.to_warehouse = wip_warehouse
+		stock_entry.project = work_order.project
+	else:
+		stock_entry.from_warehouse = (
+			work_order.source_warehouse
+			if work_order.skip_transfer and not work_order.from_wip_warehouse
+			else wip_warehouse
+		)
+		stock_entry.to_warehouse = work_order.fg_warehouse
+		stock_entry.project = work_order.project
+
+	if purpose == "Disassemble":
+		stock_entry.from_warehouse = work_order.fg_warehouse
+		stock_entry.to_warehouse = target_warehouse or work_order.source_warehouse
+
+	stock_entry.set_stock_entry_type()
+
+	bomscrapitems =  get_coproduct_scrap_items(work_order.bom_no,purpose)
+
+	# logger.info(f"work_order_id :  {work_order_id}")
+	# logger.info(f"scrap_items :  {scrap_items}")
+	# logger.info(f"bomscrapitems   :  {bomscrapitems}")
+
+	scrap_items_dict = json.loads(scrap_items)
+	stock_entry.coproductqty =0
+	for item in bomscrapitems:
+		if item["material_type"] == "Co Product":
+			scrap_itemqty= scrap_items_dict[item["item_code"]]
+			if(scrap_itemqty):
+				stock_entry.coproductqty = stock_entry.coproductqty+ scrap_itemqty
+
+	stock_entry.get_items()
+	
+
+	if purpose != "Disassemble":
+		stock_entry.set_serial_no_batch_for_finished_good()
+
+	for item in stock_entry.get("items"):
+		if (item.is_scrap_item):
+			scrap_itemqty= scrap_items_dict[item.item_code]
+			if(scrap_itemqty):
+				item.qty = scrap_itemqty
+
+	return stock_entry.as_dict()

@@ -161,6 +161,8 @@ class StockEntry(StockController):
 		work_order: DF.Link | None
 	# end: auto-generated types
 
+	coproductqty = 0.0
+
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 		if self.purchase_order:
@@ -1041,8 +1043,6 @@ class StockEntry(StockController):
 		#logger.info(f"calculation_type = 1 {calculation_type == 1}")
 		scrap_item_dict = self.get_bom_scrap_material(self.fg_completed_qty)
 		# logger.info(f"scrap_item_dict : {scrap_item_dict}")
-		# for item in scrap_item_dict.values():
-		# 	logger.info(f"si : {item}")
 		
 		if calculation_type == "1":
 			productionQty = 0
@@ -1062,7 +1062,6 @@ class StockEntry(StockController):
 					item.basic_rate = frappe.db.get_value("BOM", self.bom_no, "custom_rate")
 					item.basic_amount = item.qty * item.basic_rate
 				if item.is_scrap_item:
-					logger.info(f"rate : {item.basic_rate}")
 					item.basic_rate = item.basic_rate
 					item.basic_amount = item.qty * item.basic_rate
 
@@ -1075,7 +1074,7 @@ class StockEntry(StockController):
 					productionQty = productionQty + item.qty
 				if item.is_scrap_item:					
 					scrap_item= [d for d in scrap_item_dict.values() if (d['item_code'] == item.item_code)]
-					logger.info(f"dsww : {(scrap_item[0]['material_type'])}")
+					#logger.info(f"dsww : {(scrap_item[0]['material_type'])}")
 					if scrap_item[0]['material_type'] == 'Co Product':
 						productionQty = productionQty + item.qty
 			
@@ -2051,7 +2050,7 @@ class StockEntry(StockController):
 						for item in item_dict.values():
 							item["to_warehouse"] = self.pro_doc.wip_warehouse
 					self.add_to_stock_entry_detail(item_dict)
-
+					#logger.info(f"item_dict : {item_dict}")
 				elif (
 					self.work_order
 					and (
@@ -2267,20 +2266,24 @@ class StockEntry(StockController):
 		self.add_to_stock_entry_detail({item.name: args}, bom_no=self.bom_no)
 
 	def get_bom_raw_materials(self, qty):
-		from erpnext.manufacturing.doctype.bom.bom import get_bom_items_as_dict
-		scrap_item_dict = (
-				get_bom_items_as_dict(
-					self.bom_no, self.company, qty=1, fetch_exploded=0, fetch_scrap_items=1
-				)
-				or {}
-			)
-		productionQty = flt(qty)
 
-		for d in scrap_item_dict.values():
-			if d['material_type'] == 'Co Product':
-				logger.info(f"get_bom_raw_materials : {d.qty}")
-				productionQty = flt(productionQty + flt(d.qty))
-					
+		productionQty = flt(flt(qty) + flt(self.coproductqty))
+
+		#logger.info(f"productionQty : {productionQty}")		
+		from erpnext.manufacturing.doctype.bom.bom import get_bom_items_as_dict
+		# scrap_item_dict = (
+		# 		get_bom_items_as_dict(
+		# 			self.bom_no, self.company, qty=productionQty, fetch_exploded=0, fetch_scrap_items=1
+		# 		)
+		# 		or {}
+		# 	)
+
+		# for d in scrap_item_dict.values():
+		# 	if d['material_type'] == 'Co Product':
+		# 		logger.info(f"get_bom_raw_materials : {d.qty}")
+		# 		productionQty = flt(productionQty +( flt(d.qty)))
+			
+		# logger.info(f"productionQty : {productionQty}")		
 		# item dict = { item_code: {qty, description, stock_uom} }
 		item_dict = get_bom_items_as_dict(
 			self.bom_no,
@@ -2333,7 +2336,6 @@ class StockEntry(StockController):
 		for item in item_dict.values():
 			item.from_warehouse = ""
 			item.is_scrap_item = 1
-			#logger.info(f"scrap : {item}")
 
 		for row in self.get_scrap_items_from_job_card():
 			if row.stock_qty <= 0:
@@ -2596,11 +2598,11 @@ class StockEntry(StockController):
 
 		if transfer_limit_qty >= to_transfer_qty:
 			allow_overproduction = True
-
+		
 		for item, item_details in item_dict.items():
 			pending_to_issue = flt(item_details.required_qty) - flt(item_details.transferred_qty)
-			desire_to_transfer = flt(self.fg_completed_qty) * flt(item_details.required_qty) / max_qty
-
+			desire_to_transfer = (flt(self.fg_completed_qty)+ flt(self.coproductqty))  * flt(item_details.required_qty) / max_qty
+			#logger.info(f"{pending_to_issue} required_qty {item_details.required_qty} {item_details.transferred_qty}")
 			if (
 				desire_to_transfer <= pending_to_issue
 				or (desire_to_transfer > 0 and backflush_based_on == "Material Transferred for Manufacture")
