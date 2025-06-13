@@ -1881,7 +1881,7 @@ def make_Custom_stock_entry(work_order_id, purpose, qty=None, target_warehouse=N
 
 	stock_entry.get_items()
 	
-
+	#logger.info(f"purpose   :  {purpose}")
 	if purpose != "Disassemble":
 		stock_entry.set_serial_no_batch_for_finished_good()
 
@@ -1890,5 +1890,11 @@ def make_Custom_stock_entry(work_order_id, purpose, qty=None, target_warehouse=N
 			scrap_itemqty= scrap_items_dict[item.item_code]
 			if(scrap_itemqty):
 				item.qty = scrap_itemqty
+				#logger.info(f"scrap_itemqty   :  {scrap_itemqty}")
+
+	if purpose == "Manufacture":
+		calculation_type = frappe.db.get_value("BOM", work_order.bom_no, "calculation_type")
+		outgoing_items_cost = stock_entry.set_rate_for_outgoing_items()
+		stock_entry.set_total_cost_for_manufactured_item(calculation_type,flt(work_order.qty) , outgoing_items_cost)
 
 	return stock_entry.as_dict()

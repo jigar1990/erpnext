@@ -846,9 +846,9 @@ class StockEntry(StockController):
 			d.basic_rate = flt(d.basic_rate)
 			d.basic_amount = flt(flt(d.transfer_qty) * flt(d.basic_rate), d.precision("basic_amount"))
 				
-		if self.purpose == "Manufacture":
-			calculation_type = frappe.db.get_value("BOM", self.bom_no, "calculation_type")
-			self.set_total_cost_for_manufactured_item(calculation_type,finished_item_qty, outgoing_items_cost)
+		# if self.purpose == "Manufacture":
+		# 	calculation_type = frappe.db.get_value("BOM", self.bom_no, "calculation_type")
+		# 	self.set_total_cost_for_manufactured_item(calculation_type,finished_item_qty, outgoing_items_cost)
 			
 		if items:
 			message = ""
@@ -1072,12 +1072,15 @@ class StockEntry(StockController):
 			for item in self.items:
 				if item.is_finished_item:# or (item.material_type == 'Co Product' and  item.is_scrap_item):
 					productionQty = productionQty + item.qty
+					logger.info(f"productionQtyFG {productionQty}")
 				if item.is_scrap_item:					
 					scrap_item= [d for d in scrap_item_dict.values() if (d['item_code'] == item.item_code)]
 					#logger.info(f"dsww : {(scrap_item[0]['material_type'])}")
 					if scrap_item[0]['material_type'] == 'Co Product':
 						productionQty = productionQty + item.qty
-			
+						logger.info(f"productionQtyco {item.qty} productionQty {productionQty}")
+
+			logger.info(f"outgoing_items_cost {outgoing_items_cost}")
 			for item in self.get("items"):
 				if (item.is_scrap_item):
 					scrap_item= [d for d in scrap_item_dict.values() if (d['item_code'] == item.item_code)]
@@ -1085,7 +1088,10 @@ class StockEntry(StockController):
 						item.basic_rate = flt(flt(outgoing_items_cost * scrap_item[0]['percentage'] /100)/item.qty)
 						item.basic_amount = flt(item.qty * item.basic_rate)
 						remaining_Cost = remaining_Cost + item.basic_amount
-			
+						logger.info(f"outgoing_items_cost {outgoing_items_cost} per {scrap_item[0]['percentage']} Qty {item.qty}")
+						
+			logger.info(f"remaining_Cost {remaining_Cost} productionQty {productionQty}")
+
 			for item in self.get("items"):
 				if item.is_finished_item:
 					item.basic_rate = flt((outgoing_items_cost - remaining_Cost) /productionQty)
